@@ -51,5 +51,14 @@ class YAMLConfig:
 
     get_path = get
 
+    def set(self, path: str, value: Any) -> None:
+        """Override one value for this run (command-line flags). Not in Kaiacord's
+        interface; only standalone-only code calls it."""
+        node = self._data
+        parts = path.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = value
+
 
 config = YAMLConfig()

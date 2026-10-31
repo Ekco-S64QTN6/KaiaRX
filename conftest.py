@@ -23,16 +23,21 @@ def _kaiacord_only(exc: BaseException) -> str | None:
     """The Kaiacord module a failure is missing, or None for a real failure."""
     import re
     while exc is not None:
-        if isinstance(exc, ModuleNotFoundError) and exc.name and exc.name.split(".")[0] == "utils":
+        if isinstance(exc, ModuleNotFoundError) and exc.name and exc.name.split(".")[0] in ("utils", "tools"):
             return exc.name
         # `from utils.radio import overnight` when the package has no such file
-        hit = re.match(r"cannot import name '(\w+)' from '(utils(?:\.\w+)*)'", str(exc)) \
+        hit = re.match(r"cannot import name '(\w+)' from '((?:utils|tools)(?:\.\w+)*)'", str(exc)) \
             if isinstance(exc, ImportError) else None
         if hit:
             mod = f"{hit[2]}.{hit[1]}"
             path = ROOT.joinpath(*mod.split("."))
             if not path.with_suffix(".py").exists() and not (path / "__init__.py").exists():
                 return mod
+        # a test that reads a Kaiacord source file this project does not carry
+        if isinstance(exc, FileNotFoundError) and exc.filename:
+            rel = str(exc.filename)
+            if rel.split("/")[0] in ("utils", "tools") and not (ROOT / rel).exists():
+                return rel
         exc = exc.__cause__ or exc.__context__
     return None
 
