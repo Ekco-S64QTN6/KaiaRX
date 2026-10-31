@@ -1,0 +1,12 @@
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# runtime data and logs (yours, not the code's)
+memory/
+logs/
+recordings/
+docs/reports/
+config/local.yaml
+# fetched at install time (tools/maintenance/fetch_radio_assets.py)
+assets/kiwiclient/

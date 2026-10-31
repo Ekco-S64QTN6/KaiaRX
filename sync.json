@@ -1,0 +1,46 @@
+{
+ "upstream": "../Kaiacord",
+ "about": "Files kept byte-identical with Kaiacord (same relative path on both sides). Everything else in this project is standalone-only. See sync.py and CLAUDE.md.",
+ "shared": [
+  "utils/__init__.py",
+  "utils/radio/*.py",
+  "utils/audio/__init__.py",
+  "utils/audio/voice_busy.py",
+  "utils/audio/process_lifecycle.py",
+  "utils/audio/dj_dashboard.py",
+  "utils/core/__init__.py",
+  "utils/core/atomic_write.py",
+  "utils/core/sanitizer.py",
+  "utils/infrastructure/__init__.py",
+  "utils/infrastructure/logging/__init__.py",
+  "utils/infrastructure/logging/kaia_logger.py",
+  "utils/infrastructure/logging/unified_logging.py",
+  "utils/infrastructure/logging/log_sanitize.py",
+  "utils/infrastructure/monitoring/__init__.py",
+  "utils/infrastructure/monitoring/telemetry_paths.py",
+  "utils/infrastructure/monitoring/async_task_registry.py",
+  "utils/infrastructure/system/__init__.py",
+  "utils/infrastructure/system/gc_quiet.py",
+  "utils/infrastructure/system/app_window.py",
+  "utils/infrastructure/system/kaia_avatar.py",
+  "assets/rx/*",
+  "assets/kaia-avatar/**/*",
+  "tools/tests/__init__.py",
+  "tools/tests/unit/__init__.py",
+  "tools/tests/conftest.py",
+  "tools/maintenance/band_notebook.py",
+  "tools/maintenance/fetch_radio_assets.py",
+  "tools/tests/unit/test_local_scanner.py",
+  "tools/tests/unit/test_waterfall.py",
+  "tools/tests/unit/test_kiwi_health.py",
+  "tools/tests/unit/test_radio_close_stream.py",
+  "tools/tests/unit/test_radio_ledger_concurrency.py",
+  "tools/tests/unit/test_rx_receiver.py"
+ ],
+ "exclude": [
+  "utils/radio/overnight.py"
+ ],
+ "reference": {
+  "CLAUDE.md": "docs/kaiacord/CLAUDE.md"
+ }
+}

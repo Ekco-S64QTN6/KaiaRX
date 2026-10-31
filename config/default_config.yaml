@@ -1,0 +1,51 @@
+# KaiaRX defaults. STANDALONE-ONLY FILE: the `radio:` section is Kaiacord's
+# (config/default_config.yaml), so the same keys mean the same things on both sides.
+# Put your own settings in config/local.yaml (git-ignored); it overrides this file.
+#
+# Kaiacord-only keys kept for parity but unused here: post_channel, post_clips,
+# live_max_minutes, overnight_log, overnight_time (they post to Discord).
+
+radio:
+  # Master switch for !skyking, !numbers, !radio and the scheduled listens.
+  enabled: true
+  # Feeds (eam.watch, Priyom) are fetched at most this often.
+  poll_hours: 6
+  # Scheduled KiwiSDR recordings: HFGCS windows (UTC) and number stations.
+  listen: true
+  hfgcs_windows_utc: ["03:10", "09:10", "15:10", "21:10"]
+  hfgcs_window_minutes: 20
+  # Number stations followed, rotated: one recording per station a day.
+  follow: ["E07", "V07", "S11A", "M12", "E11"]
+  numbers_per_day: 6
+  # UVB-76 calibration samples at night, kept in memory/radio/uvb76/.
+  uvb76_samples: true
+  # Catches are posted here; set post_clips false to keep them to the log.
+  post_channel: kaia-opolis
+  post_clips: true
+  live_max_minutes: 60
+  overnight_log: true
+  overnight_time: "08:30"
+
+  # The local RTL-SDR (utils/radio/scanner.py): a waterfall watch over the
+  # voice bands during these local hours, writing what it catches to
+  # memory/radio/local_ledger.sqlite3. !scanner shows it and plays presets.
+  local:
+    enabled: true
+    hours: "00:00-06:00"
+    gain: 40
+    # KAIA//RX, the receiver dashboard (`!scanner dash`), on 127.0.0.1 at this
+    # port (0 picks a free one).
+    dashboard_port: 47442      # Kaiacord uses 47432; different so both can be open
+    # The dongle's crystal error in parts per million. A generic RTL2832U can
+    # sit tens of ppm off (50 ppm is 22 kHz at 444 MHz); measure it against a
+    # known carrier such as NOAA and set it here.
+    ppm: 0
+    # Local repeaters to name in the ledger (RepeaterBook lists yours):
+    #   - {mhz: 146.94, label: "W1XYZ repeater (FM, 100.0)", mode: fm}
+    #   - {mhz: 443.4, label: "W1XYZ repeater (DMR)", mode: digital}
+    channels: []
+    # Nets to sit on for their whole window (local time); pre-empts the scan
+    # and runs outside `hours`:
+    #   - {mhz: 146.94, day: thu, time: "19:30", minutes: 60, label: "Club net"}
+    nets: []
+
