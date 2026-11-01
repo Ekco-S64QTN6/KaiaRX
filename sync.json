@@ -35,7 +35,9 @@
   "tools/tests/unit/test_kiwi_health.py",
   "tools/tests/unit/test_radio_close_stream.py",
   "tools/tests/unit/test_radio_ledger_concurrency.py",
-  "tools/tests/unit/test_rx_receiver.py"
+  "tools/tests/unit/test_rx_receiver.py",
+  "tools/maintenance/ledger_repair.py",
+  "tools/tests/unit/test_ledger_repair.py"
  ],
  "exclude": [
   "utils/radio/overnight.py"
