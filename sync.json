@@ -37,7 +37,9 @@
   "tools/tests/unit/test_radio_ledger_concurrency.py",
   "tools/tests/unit/test_rx_receiver.py",
   "tools/maintenance/ledger_repair.py",
-  "tools/tests/unit/test_ledger_repair.py"
+  "tools/tests/unit/test_ledger_repair.py",
+  "tools/maintenance/fetch_street_names.py",
+  "tools/tests/unit/test_scanner_streets.py"
  ],
  "exclude": [
   "utils/radio/overnight.py"
