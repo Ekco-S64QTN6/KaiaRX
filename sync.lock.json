@@ -72,7 +72,7 @@
  "utils/radio/scanner.py": "7dd40f957e18ea6f70fbc409b3e8108dc50a42064b7a8397212c99d2de9ccd4a",
  "utils/radio/spectrogram.py": "7fb3bd1e0819f090e9af7b19529d3a6761369334df15ce73600b7013e6325b72",
  "utils/radio/streets.py": "429968337742e716c27f8901fbcac77c0bc714260e268a0846530114aa4517d5",
- "utils/radio/transcribe.py": "8cd0a3ee795e0f7d76ebdb63e56218c08c7d88fd2e399fc82d7527c186fc8a36",
+ "utils/radio/transcribe.py": "8fc5310ee03b32fe9edb9db71ac9a371c6e687b13383b11431501e7436d5cf98",
  "utils/radio/watch.py": "95d39ca751ca69614b853175472999b8f3bc6f37aa574f2507c85cd3b377c81d",
  "utils/radio/waterfall.py": "8442c1c9830598e7532458a304ad60e84ca15daf2ecdefc12f5401adaaf2b953"
 }
