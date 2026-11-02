@@ -324,6 +324,11 @@ carry their own caps (`url_max_content_length`); cutting the whole string cut th
 `MAX_POSTS_PER_DAY`; "for future reference" is recorded, not posted; never from a DM). Only her own act
 counts — "would be flagged", "do you want me to log it" are left alone.
 
+**What her commands are comes from the registry** (`commands_note`): a turn naming a `!` command or asking what her
+commands are carries the registry's lines for them. Asked about `!help` she had called it an internal diagnostic tool.
+The open loop in her "returning" dossier is the speaker's own plan (`open_loops.find`: "i" as its subject, not a
+question, not pasted text); the old patterns kept "want to see it? yes or no?" as Starkind's intention.
+
 ### Direct messages stay private
 
 A DM is answered, but it is logged to `memory/dm_logs/<user id>.md` (`utils/core/dm_log.py`), never to
@@ -487,6 +492,11 @@ quotes and stage directions keep their lines) and runs in what she sends and in 
 not finished until the logs match it:** her logged turns are retrieved and her recent ones are the template, so
 `tools/maintenance/clean_kaia_turns.py` runs the same filters over her turns in `user_logs/`, channel memory and
 her board posts (a person's turns are never touched; it refuses while the bot runs), then reindex.
+On 2 Nov a half-sentence copied from a quip, "the thing about those old…", stood in ten replies in a morning (five words:
+under the six-word key, and no stock vocabulary), and "the cycles of decline. the patterns of collapse." runs reached 38%
+of her replies (under 2% before mid-October). `detemplate_history` drops any short line she has used twice in the window
+(`_short_line_key`) and collapses a run of three or more short verbless "the …" sentences (`_the_fragment`), in what she is
+shown only: "the echoes resonate." is a clause the auxiliary check cannot see, so nothing here touches what she sends.
 **She addresses whoever is talking to her** (`correct_addressee`): every name she uses to address someone
 in the channel is put right to the message's author unless they brought the other person up, all of the
 author's names counting (GuardNGnowm is GnowmaticFlux's nickname), and her past turns are shown without the
@@ -965,6 +975,8 @@ is a novelty, not a live feed), one request at a time, with the identifying User
 traffic". EAMs and number-station groups are encrypted: nothing Kaia says may claim to decode
 one. Research: `docs/reports/investigations/2026-09-24-shortwave-feasibility.md`.
 
+An unsquelched recording that came back in pieces is one broadcast (`watch.stitch`): a KiwiSDR reconnect starts a new file, and one E11 was five posts. Squelched files stay separate, each is a transmission.
+
 A number-station recording is kept only for a keyed tone (`watch.keyed_tone`: prominent within the
 recording's own passband, and switching on and off) or speech. Measured against the whole speech
 band, CW mode's narrow filter made pure static look tonal, and a steady carrier passed as a tone.
@@ -1279,6 +1291,11 @@ when it does. Otherwise a post rotates among its home label and the ambient ones
 the last label used in that channel. An observation is always an Observation. Tune the cues
 against `utils/core/unprompted._leans`, and keep `test_descriptive_labels_are_only_worn_when_earned`
 passing: "Unspooling" on a post that questions nothing stops meaning anything.
+
+**A post of her own has nobody to echo.** `message_processor.UNADDRESSED_PLATFORMS` (the quip, the overnight log):
+the "message" there is her own thought or the facts she was given, so `strip_echoed_query`, `strip_restatements`,
+`correct_addressee` and `correct_vocative_name` do not run. They were cutting the sentences that used the facts,
+and addressing strangers as "kaia".
 
 **A reply to an unprompted post is addressed to her.** `speak` marks the post `unprompted: True` in
 channel memory, and the reply context names no recipient for it. It used to fall back to the last
@@ -1648,6 +1665,10 @@ diagnosis (`DIAGNOSIS`: "likely driven by a desire for control", "on the edge of
 An anchor whose text names one person she knows is theirs, whatever the model put in its user field,
 and retrieval never recalls a global anchor naming someone else to the person she is talking to; an
 anchor written as a report of a source ("The author is struck by…") is not kept.
+A full belief store keeps what she just thought (`beliefs_store.evict_weakest`): a new belief starts at
+`NEW_BELIEF_CONFIDENCE` and every older one scores higher, so the weakest was always the one just written. From 23 Oct
+each new belief evicted itself and "New Belief Formed" was logged anyway. For `PROTECT_NEW_S` a belief is not up for
+eviction; after that one she reached only once fades unless she recalls it or reaches it again.
 
 `knowledge_base/kaia_dreams/` is its own RAG index, and `context_optimizer` labels what is
 retrieved from it **INTERNAL REFLECTION (DREAM)** — as something Kaia thought — except an
