@@ -88,7 +88,7 @@ so a mis-marked test fails fast instead of loading a model:
 
 | Workflow | Runs |
 |:--|:--|
-| `unit-tests.yml` | every PR and push to `main`: `.github/scripts/run_ci_tests.py` — `compileall` over `utils/` and `tools/`, the hygiene baseline (`test_suite_hygiene`, `test_chat_model_calls`, `test_no_shadowed_imports`), plus the tests for what the diff touched (`test_<stem>.py`, every test file that imports the changed module — skipped for one imported by more than `MAX_IMPORTERS` — `RELATED_TESTS`, all of `tools/tests/unit/ttrpg/` for a `utils/ttrpg/` change) |
+| `unit-tests.yml` | every PR and push to `main`: `.github/scripts/run_ci_tests.py` — `compileall` over `utils/` and `tools/`, the hygiene baseline (`test_suite_hygiene`, `test_chat_model_calls`, `test_no_shadowed_imports`, `test_no_undefined_globals`), plus the tests for what the diff touched (`test_<stem>.py`, every test file that imports the changed module — skipped for one imported by more than `MAX_IMPORTERS` — `RELATED_TESTS`, all of `tools/tests/unit/ttrpg/` for a `utils/ttrpg/` change) |
 | `ttrpg-tests.yml` | Full `tools/tests/unit/ttrpg/` suite when `utils/ttrpg/**`, `tools/tests/unit/ttrpg/**`, or the workflow file changes; also supports manual dispatch |
 | `records-audio-tests.yml` | `test_records.py` when `utils/audio/records.py` changes |
 
@@ -201,6 +201,12 @@ Verified 2026-11-06: **369 monsters**, **395 gear + 58 consumables = 453 items**
   `dungeon.boss_level_multiplier()`, followed by the existing per-level caps. Do not casually
   rewrite the boss ATK cap table: its level-10 entry is intentionally non-monotonic and currently
   does not bind for registry bosses.
+- **Measure a balance change by playing it.** `tools/simulation/progression_sim.py` plays 25
+  characters from level 1 to 15 through the real combat engine, loot tables and prices, and prints
+  days per level, retreats, deaths and gil by source; run it before and after and compare by level
+  (`docs/ttrpg/aethelgard_system.md`, *Power curve*). Monster scaling lives in
+  `encounter_tables.scale_overworld_monster` and `dungeon.scale_dungeon_mob`, which the simulator
+  calls too: scaling done inline at a call site is scaling it cannot see.
 - **Spine stair guardians are floor-scaled encounter instances.** Build them with
   `spine_dungeon.scale_stair_guardian()`; do not mutate `monster_registry.MONSTERS`. Keep the
   floor HP/ATK/DEF curve and milestone Resonance Ward in sync with
@@ -480,7 +486,11 @@ that does not hold** (6 Nov): 254 of 258 turns over 6,000 tokens ran cold (media
 0.75 `COLD_S_PER_TOKEN` line), and the journal since 4 Nov has 433 `forcing full prompt re-processing` against
 87 `restored context checkpoint` — about one restored turn per warm-up (105 logged), each warm-up a ~10k-token
 background prefill that queues ahead of the next chat turn. The single-prompt measurement (13.7 s → 10.2 s)
-was real; across real traffic the cache rolls over. Roadmap item; measure before keeping or dropping it.
+was real; across real traffic the cache rolls over. A cause found 8 Nov: the identity stream was *prepended*, so every
+real prompt opened on it and never on the persona the warm-up caches. It goes after the persona now; nothing may be put
+ahead of the persona (the self-model and constitution still are, and are off). Measure I5 again before dropping the warm-up.
+What follows the persona is undashed (`undash`), and so is her shown history: the persona forbids the em dash, and from
+3 Nov it was in 45-64% of her replies, copied from a prompt full of them. Her replies themselves are not filtered for it.
 `[TOKEN_DEBUG]` logs `prompt_s`.
 
 ### Repeat penalty
@@ -530,6 +540,11 @@ called.
 > title, an emptied reply — confirmed in what was actually sent (the user log,
 > the channel), is fixed on sight, in the guard and in the log (see the rules
 > below). Making a guard remove less never needs a report.
+>
+> One exception, Ekco's (8 Nov): **a line that is only a bracketed narration** —
+> "(a faint smile)", "(returning focus to the lake)", "(solely addressing
+> starkind)" — is removed from what she sends and is shown (`strip_address_tag`).
+> A bracket inline, an asterisk span, or one with "i"/"you" in it is not touched.
 
 
 `response_filter.py` guards run in two modes and the distinction matters:
@@ -620,8 +635,11 @@ history, so the opener passed both filters). A short verbless line is now keyed 
 (`_frag_key`: "a quiet", "it's a quiet"; an "a …" line up to ten words) when it is made of her stock vocabulary (`_stock_fragment`:
 `_STOCK_ADJ`, `_ABSTRACT`) — "a woman, it seems." and "an m6.86 flare." describe a picture and report a reading,
 and a bracketed stage direction is hers. The same note copied out of the prompt, "(speaking exclusively to
-starkind)", headed every reply by 16 Oct; `strip_address_tag` takes it out of what she sends and what she is
-shown. Her paragraphs fragmented too — 2.3 a reply of ~32 words in early September, 5.4 of ~19 by mid-October —
+starkind)", headed every reply by 16 Oct, and reworded ("(solely addressing starkind)") 61 replies on 3–4 Nov;
+`strip_address_tag` takes it out of what she sends and what she is shown. An opening she reuses is keyed on its
+first three words (`_opener_key`): "it's funny how …" opened 27 of 33 replies to Starkind on 8 Nov, each copied from
+the last. Her shown turns lose it at two uses in the window, what she sends at three of her last six
+(`strip_repeated_opening`), with any sentence that only continued it, and never when what remains could not stand. Her paragraphs fragmented too — 2.3 a reply of ~32 words in early September, 5.4 of ~19 by mid-October —
 and `reflow_paragraphs` joins short prose paragraphs back together. From 16 Oct the cadence came back as
 litanies — "a pattern identified. a tendency observed. a habit acknowledged." — in 38% of replies (none before
 October); `collapse_litany` keeps the first two of a run of three or more "a …" fragments made of her stock
@@ -711,8 +729,10 @@ as `[TOKEN_DEBUG]`, which is where to look if reply truncation reappears; the fi
 
 Images go inline to `gemma3:12b` as base64 on the `user` message. Three things about that path:
 
-- **It keys off `ctx.message.attachments` and nothing else.** Any platform that wants Kaia to see
-  a picture has to populate that list. The forum did not, so `MockMessage.attachments` was always
+- **It keys off `ctx.message.attachments`, plus on Discord the pictures a message links**
+  (`image_links.vision_sources`: a URL whose path ends in an image extension, an `image`/`gifv`
+  embed's still). The link scraper skips those URLs, which it used to report as a page that
+  "wouldn't load". Any other platform that wants Kaia to see a picture has to populate the list. The forum did not, so `MockMessage.attachments` was always
   empty and she answered image posts blind — a photograph in thread 443378 drew *"those symbols
   again? what are you trying to do?"*. `MockAttachment` supplies the `.filename`/`.url` the branch
   reads, and guesses an extension for `attachment.php?attachmentid=…`, which has none and would
@@ -1098,6 +1118,13 @@ same reply. A button that later edits such a message changes only the status lin
 (`kaia_forum.draft_review_embed`), and an edit that runs before bookkeeping must not be able to
 throw past it — Reject's did, and the rejected reply came back.
 
+**Every `!rpg` turn ends on a card with buttons** (`utils/ttrpg/turn_buttons.py`). A typed
+command or a button press is one turn; what it sends through `msg.channel.send` or `send` is
+recorded, and if its last card has no view, the turn's earlier buttons move down to it or the
+buttons for where the player is (the fight, Hunt Again + Status in the wild, Status in town) are
+added. A forest event's card used to arrive bare. A button that calls a handler directly goes
+through `turn_buttons.run`; a card a view sends itself takes `turn_buttons.buttons_for`.
+
 `!help`, `!nightshift` and `!scanner` are button panels (`discord.ui.View`). `!help` is a landing page with a button per section that swaps the page in place; owner-only commands are only in its Admin section, and what a press shows is decided by the presser's ownership, not the invoker's. A button runs the same handler
 the typed command does, with a message-shaped stand-in for the click (`nightshift._Click`), so a
 feature has one code path whether it is clicked or typed.
@@ -1327,7 +1354,16 @@ it headless (Playwright) against the real data.
   Python applies a pair only if the misheard form is in the excerpt, is a phrase or a non-word,
   and the correction is capitalised and *sounds like* it. Without the sound test gemma3 answered
   confidently and wrongly — "simx" (cymek) became "thinking machines" sixteen times. What was
-  changed is recorded in the sidecar's `name_corrections`.
+  changed is recorded in the sidecar's `name_corrections` and `memory/transcript_name_corrections.jsonl`.
+  **The video's description is the reference** (`fetch_description`): the model is shown it, and
+  a correction to a name it spells is trusted. Sounding alike was not enough — over 433 recorded
+  pairs (Sept–Nov) the model swapped real names for others ("richard nixon" → "Jack Nicholson",
+  "south africa" → "South America", "kosen" → "Jason" for the host Costin). So a pair is refused
+  when what was heard is already real words *or names the corpus spells* (`corpus_names`: the
+  English list has no proper nouns), when it adds, deletes or truncates words, and, unless the
+  description spells the correction, when it opens on a different sound. People on the
+  description's labelled cast/host/guest lines are also matched to the captions without the model
+  (`reference_corrections`). Precision over recall: "hurricane helen" stays as captioned.
 - **Write frontmatter through `utils.core.frontmatter.dump_frontmatter`, never by string
   formatting.** Every corpus
   writer that built a block with an f-string has produced invalid YAML:
@@ -1458,7 +1494,9 @@ anchor written as a report of a source ("The author is struck by…") is not kep
 A full belief store keeps what she just thought (`beliefs_store.evict_weakest`): a new belief starts at
 `NEW_BELIEF_CONFIDENCE` and every older one scores higher, so the weakest was always the one just written. From 23 Oct
 each new belief evicted itself and "New Belief Formed" was logged anyway. For `PROTECT_NEW_S` a belief is not up for
-eviction; after that one she reached only once fades unless she recalls it or reaches it again.
+eviction; after that one she reached only once fades unless she recalls it or reaches it again. At most `PROBATION_SLOTS` (20)
+are inside that week: with every new belief protected and nine formed a night, the only ones left to evict were her
+oldest and most recalled (64 of 100 lost, 2–9 Nov), so past the slots a new belief displaces the weakest new one.
 
 `knowledge_base/kaia_dreams/` is its own RAG index, and `context_optimizer` labels what is
 retrieved from it **INTERNAL REFLECTION (DREAM)** — as something Kaia thought — except an
@@ -1536,7 +1574,9 @@ production from test runs (see [§9](#9-logging)) has now produced a wrong concl
 **Exercise the code, do not just parse it.** `ast.parse` passes happily on a `NameError` waiting
 to happen — a config read added to `kaia_proactive` referenced a `config` that module never
 imported, and only calling the function found it. Three separate defects this September were
-caught by running the changed path and none by reading it.
+caught by running the changed path and none by reading it. The global-name case is now caught
+statically (`test_no_undefined_globals`, CI baseline): `run_caravan_arrival` called
+`update_world_state` unimported from 4 to 9 Nov, so no caravan was ever reachable.
 
 **A test that runs a tool is a tool run.** `test_tools_runnable` checked that every script in
 `tools/` can start, by invoking `python <tool> --help`. Sixteen of them have no argparse, so the
