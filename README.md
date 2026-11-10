@@ -39,6 +39,18 @@ venv/bin/python kaiarx.py notebook       # rewrite docs/reports/reference/local_
 venv/bin/python kaiarx.py status
 ```
 
+Maintenance tools (shared with Kaiacord):
+
+```bash
+venv/bin/python tools/maintenance/fetch_street_names.py "Your County" --write  # street list for dispatch transcripts
+venv/bin/python tools/maintenance/ledger_repair.py --clips --streets           # bring the ledger up to today's judging; --apply writes
+venv/bin/python tools/maintenance/band_notebook.py --write                     # same as `kaiarx.py notebook`
+```
+
+`fetch_street_names.py` queries OpenStreetMap once and writes the git-ignored
+`memory/radio/streets.json`; the scanner corrects misheard street names in dispatch transcripts
+against it. Without it, transcripts are left as heard.
+
 Settings: copy what you want to change from `config/default_config.yaml` into
 `config/local.yaml` — scan hours, gain, dongle ppm, your local repeaters and nets,
 which number stations to follow, the dashboard port (47442).
