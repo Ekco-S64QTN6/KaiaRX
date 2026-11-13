@@ -31,11 +31,11 @@ def _hiss(seconds: float) -> np.ndarray:
     return (np.diff(rng.normal(size=int(12000 * seconds) + 1)) * 5000).astype(np.int16)
 
 
-def _catch(freq, audio, seconds=8.0):
+def _catch(freq, audio, seconds=8.0, *, pinned=False):
     # Every hold ends in the squelch tail it waited out.
     audio = np.concatenate([audio, _hiss(2.0)]) if len(audio) >= 12000 else audio
     return NS(freq_hz=freq, started=datetime(2026, 9, 26, 2, 30).timestamp(), seconds=seconds,
-              peak_db=20.0, audio=audio)
+              peak_db=20.0, audio=audio, pinned=pinned)
 
 
 def test_a_catch_with_words_is_voice_and_lands_in_its_hour(monkeypatch):
@@ -178,19 +178,40 @@ def test_a_channel_that_never_carries_voice_stops_being_transcribed(monkeypatch)
     assert len(calls) == scanner.QUIET_CHANNEL_HITS + 1       # …until every tenth catch rechecks
 
 
-def test_a_net_is_transcribed_and_clipped_whatever_the_nights_budget(monkeypatch):
-    """The overnight scan spends the same date's allowance; a net at 20:15 must still be heard."""
+def test_a_pinned_catch_is_transcribed_and_clipped_whatever_the_nights_budget(monkeypatch):
+    """Capture-time pin context survives after the parent has changed/cleared its pin."""
     calls, clips = [], []
     monkeypatch.setattr(scanner, "_transcribe", lambda a, **k: calls.append(1) or "")
     monkeypatch.setattr(scanner, "_save_clip", lambda audio, f, t: clips.append(f) or "clip.ogg")
     monkeypatch.setitem(scanner._transcribed, "date", datetime.now().strftime("%Y-%m-%d"))
     monkeypatch.setitem(scanner._transcribed, "count", scanner.TRANSCRIBE_PER_NIGHT)
     audio = (np.sin(np.linspace(0, 2000 * np.pi, 12000 * 6)) * 3000).astype(np.int16)
-    scanner.classify(_catch(147_570_000, audio, seconds=6))
-    assert calls == [] and clips == []                    # open scan: budget spent, a carrier, no clip
-    monkeypatch.setattr(scanner, "_pinned", {"freq_hz": 147_570_000, "label": "net", "until": 0})
-    scanner.classify(_catch(147_570_000, audio, seconds=6))
-    assert calls == [1] and clips == [147_570_000]        # on the net: transcribed, and kept to listen to
+    scanner._pinned = None
+    scanner.classify(_catch(147_570_000, audio, seconds=6, pinned=True))
+    assert calls == [1] and clips == [147_570_000]
+
+
+def test_a_scan_catch_does_not_inherit_a_later_watch_pin(monkeypatch):
+    """A backlog catch from an open scan is not promoted to a net by a new watch."""
+    import time
+    from utils.radio import waterfall
+
+    calls, clips = [], []
+    monkeypatch.setattr(scanner, "_transcribe", lambda a, **k: calls.append(1) or "")
+    monkeypatch.setattr(scanner, "_save_clip", lambda audio, f, t: clips.append(f) or "clip.ogg")
+    monkeypatch.setattr(scanner, "morse_id", lambda _audio: False)
+    monkeypatch.setattr(waterfall, "is_packet", lambda _audio: False)
+    monkeypatch.setattr(waterfall, "voice_like", lambda _audio: False)
+    monkeypatch.setitem(scanner._transcribed, "date", datetime.now().strftime("%Y-%m-%d"))
+    monkeypatch.setitem(scanner._transcribed, "count", scanner.TRANSCRIBE_PER_NIGHT)
+    monkeypatch.setitem(scanner._transcribed, "speech", scanner.SPEECH_PER_NIGHT)
+    monkeypatch.setattr(scanner, "_pinned", {
+        "freq_hz": 147_570_000, "label": "a later watch", "until": time.time() + 60,
+    })
+    audio = (np.sin(np.linspace(0, 2000 * np.pi, 12000 * 6)) * 3000).astype(np.int16)
+    scanner.classify(_catch(147_570_000, audio, seconds=6, pinned=False))
+    assert calls == [] and clips == []
+    assert ledger.recent(1)[0]["kind"] == "carrier"
 
 
 def _speechlike(monkeypatch, said: str):
@@ -792,3 +813,109 @@ def test_a_burst_of_tunes_ends_on_the_last_and_back_to_scan_really_stops(monkeyp
         await scanner.untune()
         await asyncio.sleep(0.1)
     asyncio.run(go())
+
+
+def test_watcher_drains_queued_catches_before_returning(monkeypatch):
+    """A stop cannot let the child publish its process sentinel before the
+    catch-forwarding worker has delivered every catch already in its queue."""
+    import threading
+
+    import utils.radio.dongle as dongle
+    from utils.radio import waterfall as w
+
+    entered = threading.Event()
+    release = threading.Event()
+    received = []
+
+    def consume(catch):
+        entered.set()
+        assert release.wait(timeout=2.0), "test did not release catch consumer"
+        received.append(catch)
+
+    class FakeDongle:
+        def __init__(self, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    stop = threading.Event()
+    stop.set()  # exercise the fastest possible child shutdown
+    watcher = w.Watcher(consume, stop=stop, hops=([], []))
+    queued = object()
+    watcher.catches.put(queued)
+
+    monkeypatch.setattr(dongle, "Dongle", FakeDongle)
+    monkeypatch.setattr(w, "span_row", lambda _row: None)
+    monkeypatch.setattr(w, "NbfmDemod", lambda _offset: None)
+
+    run = threading.Thread(target=watcher.run, name="test-watcher-run")
+    run.start()
+    try:
+        assert entered.wait(timeout=1.0), "queued catch was not handed to the worker"
+        assert run.is_alive(), "watcher returned before its catch worker drained"
+    finally:
+        release.set()
+    run.join(timeout=1.0)
+
+    assert not run.is_alive(), "watcher did not finish after the worker was released"
+    assert received == [queued]
+
+
+def test_transcription_allowance_is_reserved_atomically_across_consumers(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(scanner, "SPEECH_PER_NIGHT", 1)
+    monkeypatch.setattr(scanner, "TRANSCRIBE_PER_NIGHT", 0)
+    today = datetime.now().strftime("%Y-%m-%d")
+    monkeypatch.setattr(scanner, "_transcribed", {"date": today, "count": 0, "speech": 0})
+
+    def reserve(_):
+        return scanner._reserve_transcription_allowance(
+            today, net=False, digital=False, packet=False,
+            speechlike=True, quiet_channel=False,
+        )
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(reserve, range(64)))
+
+    assert results.count("speech") == 1
+    assert results.count(None) == 63
+    assert scanner._transcribed["speech"] == 1
+
+
+def test_scanner_budget_rolls_over_once_under_concurrent_reservations(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(scanner, "SPEECH_PER_NIGHT", 4)
+    monkeypatch.setattr(scanner, "TRANSCRIBE_PER_NIGHT", 0)
+    today = datetime.now().strftime("%Y-%m-%d")
+    monkeypatch.setattr(scanner, "_transcribed", {"date": "yesterday", "count": 99, "speech": 99})
+
+    def reserve(_):
+        return scanner._reserve_transcription_allowance(
+            today, net=False, digital=False, packet=False,
+            speechlike=True, quiet_channel=False,
+        )
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        results = list(pool.map(reserve, range(48)))
+
+    assert results.count("speech") == 4
+    assert scanner._transcribed == {"date": today, "count": 0, "speech": 4}
+
+
+def test_morse_clip_interval_reservation_is_atomic(monkeypatch):
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    monkeypatch.setattr(scanner, "_id_clips", {})
+    now = time.time()
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(lambda _i: scanner._reserve_morse_clip(146_520_000, now), range(64)))
+
+    assert results.count(True) == 1
+    assert results.count(False) == 63

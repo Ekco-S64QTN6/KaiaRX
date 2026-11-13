@@ -78,9 +78,12 @@ additionally loads `gemma3:12b`, which evicts the production model from VRAM.
 Markers are declared in `pytest.ini` under `--strict-markers`, so a typo'd marker is an error
 rather than a silently ignored one: `slow`, `gpu`, `ollama`, `network`, `integration`.
 
-**There is no linter or formatter.** No `ruff`, `black`, `pyproject.toml`, `setup.cfg`, or
-pre-commit hook exists, and none is in `requirements.txt`. Don't go looking for one, and don't
-introduce one without asking. Validation is the test suite plus exercising the code you changed.
+**There is no formatter, and the linter is narrow.** CI runs `ruff` for error rules only
+(`ruff.toml`: syntax, undefined names) and a mypy ratchet that stops a changed `utils/` file
+gaining type errors; neither tool is in `requirements.txt` or the venv, and nothing rewrites a
+file. `docs/04-development/quality-gate.md` has the commands and the baseline. Don't widen the
+rule set, add a formatter, `pyproject.toml` or a pre-commit hook without asking. Validation is
+still the test suite plus exercising the code you changed.
 
 **CI is focused, not the suite.** `.github/workflows/` runs on GitHub Actions with fake
 credentials (`DISCORD_TOKEN`, `GEMINI_API_KEY` sentinels) and `OLLAMA_HOST` pointed at a dead port,
@@ -91,6 +94,11 @@ so a mis-marked test fails fast instead of loading a model:
 | `unit-tests.yml` | every PR and push to `main`: `.github/scripts/run_ci_tests.py` — `compileall` over `utils/` and `tools/`, the hygiene baseline (`test_suite_hygiene`, `test_chat_model_calls`, `test_no_shadowed_imports`, `test_no_undefined_globals`), plus the tests for what the diff touched (`test_<stem>.py`, every test file that imports the changed module — skipped for one imported by more than `MAX_IMPORTERS` — `RELATED_TESTS`, all of `tools/tests/unit/ttrpg/` for a `utils/ttrpg/` change) |
 | `ttrpg-tests.yml` | Full `tools/tests/unit/ttrpg/` suite when `utils/ttrpg/**`, `tools/tests/unit/ttrpg/**`, or the workflow file changes; also supports manual dispatch |
 | `records-audio-tests.yml` | `test_records.py` when `utils/audio/records.py` changes |
+| `quality.yml` | every PR and push to `main`: `ruff check .` (error rules), then `tools/maintenance/type_ratchet.py` |
+| `dependency-audit.yml` | weekly and on a `requirements.txt` change: `pip-audit`, report-only |
+
+`unit-tests.yml` also collects coverage from the tests it selected and fails when under 20% of
+the statements a change adds to `utils/*.py` ran (`tools/maintenance/changed_line_coverage.py`).
 
 A green check is therefore not a green suite: run the full no-external-services invocation
 locally before merging anything wider than one module. Tests named by behaviour are found by
@@ -228,6 +236,17 @@ Verified 2026-11-10: **369 monsters**, **395 gear + 58 consumables = 453 items**
   lock; their helper acquires the unique caller and target `user:<uid>` locks in sorted UID order.
   A self-target takes that one lock once. Any new multi-character mutation must preserve this
   global order and keep the complete reload/mutate/save operation inside the locks.
+- **A record id is never a path.** Every per-player or per-channel file name is built with
+  `record_scan.safe_record_id` (letters, digits, `_`, `-`; at most 64): `!rpg visit` once passed typed text
+  to `housing._housing_path`, and `../../x` read any `.json` the bot could open. A loader that is asked for
+  something that is not an id answers "no such record" (`load_housing` returns `None`); a writer raises.
+  New character names are one word of 2-24 characters (`NAME_PATTERN`), so a name cannot carry a mention or
+  markup into every card that repeats it.
+- **Anything that sells, fights or mutates a sheet from a button takes the player's action lock** and reloads
+  the sheet under it. The caravan shop (`_caravan_purchase`) names itself as the merchant
+  (`process_purchase(..., merchant="caravan")`): the merchant defaults to the sheet's location, and a player in
+  town was being sold from Hemlock's shelves, which hold none of the caravan's stock. `!rpg raid` is a combat
+  action (`serialize_combat_action`) and refuses a second fight: every Bandit Captain pays in full.
 - **Atomic writes everywhere**: `utils/core/atomic_write.write_atomic()`. Do not call
   `Path.write_text` on anything under `knowledge_base/` or `memory/`. The rule dates from a
   half-written registry that caused an outage, and it was being followed where people remembered
@@ -321,6 +340,10 @@ Verified 2026-11-10: **369 monsters**, **395 gear + 58 consumables = 453 items**
   tests/bootstrap only. The hunt entry stamina debit is an intentional one-way reservation before
   encounter generation, not a refundable two-file write. Fault-inject each write boundary and test
   repeated recovery.
+- **A tool that rewrites a log the bot appends to takes `atomic_write.append_lock(path)`, re-reads, and writes
+  only if the file is unchanged.** Metadata enrichment held a file for the length of a model call and then
+  wrote its old copy back over the turns appended meanwhile; `enrich_metadata` and `compact_user_logs` now skip
+  a file that moved and leave it for the next pass.
 - **Appends to a user log are serialised by a sidecar `flock`.** `append_atomic` and the RAG
   interaction logger (`_write_interaction_to_disk`) both lock `.<log name>.append.lock` beside the
   log and decide "first write, add the header" inside the lock — two worker threads each carried
@@ -379,7 +402,10 @@ Verified 2026-11-10: **369 monsters**, **395 gear + 58 consumables = 453 items**
 - **Shutdown has a real upper bound and still saves what matters.** `AsyncTaskRegistry.cancel_all(timeout)`
   uses `asyncio.wait(..., timeout=...)`, not `wait_for(gather(...))`: a task that catches `CancelledError`
   made `wait_for` wait past its timeout. Voice and radio stop first, as tracked tasks sharing one
-  `timeouts.shutdown_task_cancel_seconds` budget (the dashboard force-exits ~18 s after asking the bot to stop).
+  `timeouts.shutdown_task_cancel_seconds` budget. The parent waits for the bot thread itself, up to
+  `dashboard_manager.BOT_SHUTDOWN_DEADLINE_S`; the screen closing is not the bot having stopped, and for months the
+  wait was released by it, three seconds before the exit. `force_exit` stops the log worker first, or the last
+  second of lines is lost.
   One that overruns is cancelled and shutdown carries on: none of them touch the index, Ollama or the GPU, and
   `scanner.shutdown()` waits up to 80 s for a last transcription. A *background* task still running after the
   registry's deadline does hold back the resource teardown (index save, model unload, AppContext), since it
@@ -438,6 +464,52 @@ commands are carries the registry's lines for them. Asked about `!help` she had 
 The open loop in her "returning" dossier is the speaker's own plan (`open_loops.find`: "i" as its subject, not a
 question, not pasted text); the old patterns kept "want to see it? yes or no?" as Starkind's intention.
 
+### Length has one owner, and it reads the turn
+
+**How much a reply should be is read from the speaker's own words, in one place**
+(`utils/core/turn_shape.py`), and the note goes beside the message. The median reply to a message of
+twelve words or fewer went from 40 words in early September to 69 in early November, and nothing in
+the prompt was reading the message for its size: length advice came from the hour ("willing to go
+longer" at night), from the average of the speaker's last five messages, and from how long the
+conversation had run, each appended on its own. A passing remark in plain text now gets "a line or
+two"; a question, a shared link or picture, and anything that offers room (a request for her view,
+"continue", a scene's "open direction", forty words or more) gets no note. Replayed on real turns
+against the live model with real retrieval, 24 asides went from a median of 52 words to 16 with her
+voice intact. The same note on short questions was tried and dropped: 3 of 12 replies came back
+capitalised or in assistant phrasing, and scene questions went flat. Do not add length advice to another injection; the hour's note is
+tone only. A new cue that should offer room goes in `_INVITATION`, checked against her logs first. Ekco reversed his 12 Nov removal on 13 Nov: replies had become long again (a forwarded post she could not read drew 448 words), and "a line or two" on passing remarks had worked before.
+
+**What she can't see or can't place, she is told beside the message** (`utils/core/grounding_notes.py`). Asked
+about a picture that never reached her, she described a sunset three times in three; asked who said an invented line,
+she named Charles Simic, Heraclitus and a Snow Crash character. The CORE RULES block forbade both, and without that
+block she also claimed to run on Claude and Gemini, so it stays; but a rule at the end of an eleven-thousand-token
+system prompt is not what she reads. The note goes on the user message when no picture loaded for the turn (a failed
+load keeps the vision note, Q40) or when a quoted line she is asked to attribute is in nothing she was given. Replayed
+(`tools/maintenance/replay_turns.py --probes`, three seeds): 0/3 to 3/3 on both, Gibson and Shakespeare still named.
+A note that only said "never guess a name" made her forget Hamlet; keep the escape for lines everyone knows.
+
+**A clipped follow-up is tied to the question it follows** (`utils/core/followup_note.py`). Cecily asked what was
+distinctive about someone's way of talking, then said "do me next", and she analysed herself (12 Nov). Replayed, the
+model misread it on every seed, with the persona alone and on the code of 8 Nov; with no system prompt it read it
+right. Saying who "me" is did nothing (0/4), nor did the previous question alone (0/5); a note carrying both, beside
+the message, was read right five seeds of five. It is written only for a few words that hand the last question to the
+speaker ("do me next", "what about me?", "my turn") after a question of their own.
+
+**A belief is recalled when the message is about it** (`utils/core/belief_recall.py`): one of its
+phrases whole (topic, a part of the topic, an alias of two words or more), or several distinctive
+words with one from its topic. The old test was any one shared word, read from the *enriched*
+message. On 354 real turns it put "you have a formed opinion on…" into 28% of prompts, nearly all
+wrongly ("open direction" recalled her view on AI and open source), 410 of 497 aliases were phrases a
+word-set intersection could never match, and every false recall counted as a use, which is what
+protects a belief from eviction: the ones with the most ordinary topic words had 400 to 668 uses.
+Recall is narrow on purpose (about 2% of turns); her reflections also arrive through retrieval.
+
+**A note that reports no reading is not sent.** The theory-of-mind line said "seems neutral, energy
+moderate, likely intent: casual_chat" on most turns; it now names only what was read. The last file
+she ingested is mentioned only when the speaker's words touch its title, not on every turn to every
+person. The identity stream is shown in whole entries (`recent_entries`), not a character slice that
+began mid-word.
+
 ### Direct messages stay private
 
 A DM is answered, but it is logged to `memory/dm_logs/<user id>.md` (`utils/core/dm_log.py`), never to
@@ -453,6 +525,21 @@ continuity/growth logs, or the delayed-afterthought queue. The DM's own transcri
 channel-memory turns are the only conversational memory writes. It must not mark its DM channel
 as the server's last active channel or proactive destination. Aggregate operational counters may
 still count a message, but they must not retain the content or channel identity of the DM.
+
+**An invitation-only thread is kept as a DM is** (`_in_private_thread`): its turns set `ctx.is_dm`, so they
+go to the author's DM log and are held to everything above, and a watched channel does not log its private
+threads. She still needs her name there. A role-restricted *channel* is not covered: a channel's name is
+not its audience, and whether the configured channels are restricted is a fact of the live server.
+A pasted message link into a private thread is read only for someone invited to it or holding
+`manage_threads` (`_requester_can_read`): a thread's permissions are its parent's.
+
+**A DM's text stays out of the diagnostic logs too.** `utils/core/private_turn.py` is a context variable set for
+the length of a DM or private-thread turn (`_run_intelligence_pipeline`); the security replay file, the
+hallucination log, the consistency watchdog's prompts and the generation-failure line write
+`private_turn.text(...)` or nothing. Memory commands (`!remember`-style phrases and profile queries), `!snapshot`
+and the engagement meter do nothing in a DM. A forwarded Discord message is read through its
+`message_snapshots` (`context_enricher._forwarded_text`) and, like every block of outside text, has the
+runtime's own markers neutralised before it reaches the prompt.
 
 ### Token budget
 
@@ -1102,6 +1189,13 @@ were once in none of them, so she aired a thought two minutes after every restar
 need at 0.0 on any active server, which caps pressure at 0.16 — so a threshold above that means
 she never speaks first, and at 0.55 she did so once in 102 evaluations. Both the threshold and
 the gate itself are configurable (`desires.initiate_threshold`, `desires.gate_enabled`).
+
+### Who may do what
+
+`Bot(allowed_mentions=...)` turns `@everyone` and role pings off for everything she sends, whatever a user got
+the model to write or named a character; people she answers may still be pinged. `dispatch_command` refuses an
+`owner_only` command for a non-owner before the handler runs, so a new owner command whose handler forgets its
+own check is still closed (handlers keep theirs). The forum draft-review buttons answer to the owner only.
 
 ### Command replies
 
