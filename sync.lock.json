@@ -33,7 +33,7 @@
  "tools/tests/unit/test_waterfall.py": "cf0a072772d01aa38b46cc3ba8840b25e131e2fb622c53ce22fd83fea9ca2c19",
  "utils/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
  "utils/audio/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
- "utils/audio/dj_dashboard.py": "4af0c57515accf94f820fbb8927f1ebe02488045d885874b0b177bb796cb4f7b",
+ "utils/audio/dj_dashboard.py": "46542e6d45bc461da55dc10b7a93122d65678106e5efd7b7f948dee391beb870",
  "utils/audio/process_lifecycle.py": "0b3b3cdd2c696d97ff2f9c7d082c44b11acc139fd2475a9da6138e6a0fb26631",
  "utils/audio/voice_busy.py": "56e768e4c2bb1af712af3c000da0565b5d1afac060f56e64977f30e6d65e0ea1",
  "utils/core/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
