@@ -91,17 +91,17 @@ so a mis-marked test fails fast instead of loading a model:
 
 | Workflow | Runs |
 |:--|:--|
-| `unit-tests.yml` | every PR and push to `main`: `.github/scripts/run_ci_tests.py` — `compileall` over `utils/` and `tools/`, the hygiene baseline (`test_suite_hygiene`, `test_chat_model_calls`, `test_no_shadowed_imports`, `test_no_undefined_globals`), plus the tests for what the diff touched (`test_<stem>.py`, every test file that imports the changed module — skipped for one imported by more than `MAX_IMPORTERS` — `RELATED_TESTS`, all of `tools/tests/unit/ttrpg/` for a `utils/ttrpg/` change) |
+| `unit-tests.yml` | every push to `main`: `.github/scripts/run_ci_tests.py` — `compileall` over `utils/` and `tools/`, the hygiene baseline (`test_suite_hygiene`, `test_chat_model_calls`, `test_no_shadowed_imports`, `test_no_undefined_globals`), plus the tests for what the diff touched (`test_<stem>.py`, every test file that imports the changed module — skipped for one imported by more than `MAX_IMPORTERS` — `RELATED_TESTS`, all of `tools/tests/unit/ttrpg/` for a `utils/ttrpg/` change) |
 | `ttrpg-tests.yml` | Full `tools/tests/unit/ttrpg/` suite when `utils/ttrpg/**`, `tools/tests/unit/ttrpg/**`, or the workflow file changes; also supports manual dispatch |
 | `records-audio-tests.yml` | `test_records.py` when `utils/audio/records.py` changes |
-| `quality.yml` | every PR and push to `main`: `ruff check .` (error rules), then `tools/maintenance/type_ratchet.py` |
+| `quality.yml` | every push to `main`: `ruff check .` (error rules), then `tools/maintenance/type_ratchet.py` |
 | `dependency-audit.yml` | weekly and on a `requirements.txt` change: `pip-audit`, report-only |
 
 `unit-tests.yml` also collects coverage from the tests it selected and fails when under 20% of
 the statements a change adds to `utils/*.py` ran (`tools/maintenance/changed_line_coverage.py`).
 
 A green check is therefore not a green suite: run the full no-external-services invocation
-locally before merging anything wider than one module. Tests named by behaviour are found by
+locally before pushing anything wider than one module. Tests named by behaviour are found by
 what they import; a test that reaches a module only indirectly still needs a `RELATED_TESTS`
 entry. Until 6 Nov only the file name was matched, and three `kaia_rag_query` tests failed on main
 for a week with every check green. CI
@@ -477,7 +477,9 @@ two"; a question, a shared link or picture, and anything that offers room (a req
 against the live model with real retrieval, 24 asides went from a median of 52 words to 16 with her
 voice intact. The same note on short questions was tried and dropped: 3 of 12 replies came back
 capitalised or in assistant phrasing, and scene questions went flat. Do not add length advice to another injection; the hour's note is
-tone only. A new cue that should offer room goes in `_INVITATION`, checked against her logs first. Ekco reversed his 12 Nov removal on 13 Nov: replies had become long again (a forwarded post she could not read drew 448 words), and "a line or two" on passing remarks had worked before.
+tone only. The conversational-fatigue note ("your responses should be getting shorter" from
+a session's fifteenth message) was removed on Ekco's word, 21 Nov: it was on 41 of 85 replies on 18 Nov, the day
+Starkind said she seemed off. A new cue that should offer room goes in `_INVITATION`, checked against her logs first. Ekco reversed his 12 Nov removal on 13 Nov: replies had become long again (a forwarded post she could not read drew 448 words), and "a line or two" on passing remarks had worked before.
 
 **What she can't see or can't place, she is told beside the message** (`utils/core/grounding_notes.py`). Asked
 about a picture that never reached her, she described a sunset three times in three; asked who said an invented line,
@@ -1057,7 +1059,7 @@ KAIA//RX or the avatar engine.** The rules that are easy to break:
   deployment facts in config, never in code or tracked docs.
 - Whisper `large-v3` on CPU in int8, English, `transcribe_speech` passes only. Smaller models, raw audio
   and the VAD filter all hallucinated on HF/FM audio; don't switch without re-running the comparison.
-- **The scanner's watcher runs in a forked child** (fds 1/2 on /dev/null, `PR_SET_PDEATHSIG`), drives
+- **The scanner's watcher runs in a forked child** (fds 1/2 on /dev/null, default SIGTERM restored before `PR_SET_PDEATHSIG`: the bot's inherited handler swallowed both), drives
   librtlsdr through ctypes, and holds the one dongle. A wedged read ends the watcher, never the handle.
 - Test scanner coverage with the simulated dongle (`test_local_scanner.py`), and look at a KAIA//RX
   change with `tools/maintenance/rx_preview.py`, not the bot.
@@ -1813,6 +1815,11 @@ from the registry in seconds and touches nothing else, so run that whenever
 - Areas: `ttrpg`, `fishing`, `combat`, `housing`, `alchemy`, `core`, `docs`, `config`, `kaia`,
   `art`, `music`, `infra`, `social`
 - One logical change per commit; don't mix balance changes with bug fixes.
+- **Commit on `main` and push straight to `origin main`.** No feature branches, no pull requests,
+  no waiting on CI: Ekco is the only developer, and the `main-protection` ruleset was disabled on
+  21 Nov 2026 for that reason. CI still runs on the push; read the run if it fails.
+- Add files by name. `git commit -a` swept Ekco's uncommitted `config/kaia.yaml` into a pushed
+  commit (21 Nov); `config/` and `memory/` are never committed by an agent.
 
 ---
 
@@ -1848,7 +1855,7 @@ it here.
 | Radio, scanner, KAIA//RX | `docs/03-architecture/radio.md` — **read before touching `utils/radio/`** |
 | Corpus layout | `knowledge_base/README.md` — **read before adding a folder** ([§10](#10-knowledge-base)) |
 | Shell tooling | `scripts/README.md` — what `kaia-tools.sh` exposes |
-| Contributing | `CONTRIBUTING.md` — human-facing PR workflow |
+| Contributing | `CONTRIBUTING.md` — PR and issue workflow for outside contributors |
 
 > `docs/reports/` is **git-ignored** — it contains transcript excerpts and runtime telemetry. It
 > exists in a working checkout but not on GitHub, so do not link it from tracked documentation.
