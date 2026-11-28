@@ -96,7 +96,7 @@ so a mis-marked test fails fast instead of loading a model:
 | `records-audio-tests.yml` | the records, identity, cache, skill, intent, set and mixer suites when a records module or its tests change |
 | `records-browser-tests.yml` | the booth and KAIA//RX pages driven in Chromium (`tools/tests/browser/`) when either page or its server changes |
 | `quality.yml` | every push to `main`: `ruff check .` (error rules), then `tools/maintenance/type_ratchet.py` |
-| `dependency-audit.yml` | weekly and on a `requirements.txt` change: `pip-audit`; blocking on a pull request, a report otherwise |
+| `dependency-audit.yml` | weekly and on a `requirements.txt`/`requirements.lock` change: `pip-audit` of the lock; blocking on a pull request, a report otherwise |
 
 `unit-tests.yml` also collects coverage from the tests it selected and fails when under 20% of
 the statements a change adds to `utils/*.py` ran (`tools/maintenance/changed_line_coverage.py`).
@@ -106,7 +106,9 @@ locally before pushing anything wider than one module. Tests named by behaviour 
 what they import; a test that reaches a module only indirectly still needs a `RELATED_TESTS`
 entry. Until 6 Nov only the file name was matched, and three `kaia_rag_query` tests failed on main
 for a week with every check green. CI
-installs `pytest` and `pytest-asyncio` itself; neither is in `requirements.txt`.
+installs `pytest` and `pytest-asyncio` itself; neither is in `requirements.txt`. Dependencies install as
+`pip install -r requirements.txt -c requirements.lock`; after editing `requirements.txt`, rerun
+`tools/maintenance/lock_requirements.py --write` and commit both, or CI fails on the stale lock.
 
 > [!NOTE]
 > **Correction (Sept 2026).** Earlier agent docs claimed that importing anything from `utils/`
@@ -480,7 +482,8 @@ voice intact. The same note on short questions was tried and dropped: 3 of 12 re
 capitalised or in assistant phrasing, and scene questions went flat. Do not add length advice to another injection; the hour's note is
 tone only. The conversational-fatigue note ("your responses should be getting shorter" from
 a session's fifteenth message) was removed on Ekco's word, 21 Nov: it was on 41 of 85 replies on 18 Nov, the day
-Starkind said she seemed off. A new cue that should offer room goes in `_INVITATION`, checked against her logs first. Ekco reversed his 12 Nov removal on 13 Nov: replies had become long again (a forwarded post she could not read drew 448 words), and "a line or two" on passing remarks had worked before.
+Starkind said she seemed off. A new cue that should offer room goes in `_INVITATION`, checked against her logs first; a social check-in
+("how are you kaia?", 407 words on 25 Nov) is a passing remark whatever its punctuation (`_CHECK_IN`). Ekco reversed his 12 Nov removal on 13 Nov: replies had become long again (a forwarded post she could not read drew 448 words), and "a line or two" on passing remarks had worked before.
 
 **What she can't see or can't place, she is told beside the message** (`utils/core/grounding_notes.py`). Asked
 about a picture that never reached her, she described a sunset three times in three; asked who said an invented line,
@@ -491,6 +494,8 @@ load keeps the vision note, Q40; a picture among the last six user turns is the 
 quoted line she is asked to attribute is in nothing she was given. Replayed
 (`tools/maintenance/replay_turns.py --probes`, three seeds): 0/3 to 3/3 on both, Gibson and Shakespeare still named.
 A note that only said "never guess a name" made her forget Hamlet; keep the escape for lines everyone knows.
+Asked when someone last spoke ("when was the last message from Jimjam?": "about an hour ago", 25 Nov; it was
+6 Oct), the note gives the date she has (`last_seen_note`, from `BotState.last_seen_by_name`), for a name she knows only.
 A link that answers with only a browser check (a `share.google` link: "If you're having trouble accessing Google
 Search…") counts as a page that would not load (`context_enricher._is_shell_page`); handed the notice as the page,
 she described what it "categorises" (14 Nov).
