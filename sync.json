@@ -39,7 +39,9 @@
   "tools/maintenance/ledger_repair.py",
   "tools/tests/unit/test_ledger_repair.py",
   "tools/maintenance/fetch_street_names.py",
-  "tools/tests/unit/test_scanner_streets.py"
+  "tools/tests/unit/test_scanner_streets.py",
+  "utils/audio/record_cues.py",
+  "utils/audio/audio_identity.py"
  ],
  "exclude": [
   "utils/radio/overnight.py"

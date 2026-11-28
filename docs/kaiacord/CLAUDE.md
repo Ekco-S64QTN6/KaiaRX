@@ -93,9 +93,10 @@ so a mis-marked test fails fast instead of loading a model:
 |:--|:--|
 | `unit-tests.yml` | every push to `main`: `.github/scripts/run_ci_tests.py` — `compileall` over `utils/` and `tools/`, the hygiene baseline (`test_suite_hygiene`, `test_chat_model_calls`, `test_no_shadowed_imports`, `test_no_undefined_globals`), plus the tests for what the diff touched (`test_<stem>.py`, every test file that imports the changed module — skipped for one imported by more than `MAX_IMPORTERS` — `RELATED_TESTS`, all of `tools/tests/unit/ttrpg/` for a `utils/ttrpg/` change) |
 | `ttrpg-tests.yml` | Full `tools/tests/unit/ttrpg/` suite when `utils/ttrpg/**`, `tools/tests/unit/ttrpg/**`, or the workflow file changes; also supports manual dispatch |
-| `records-audio-tests.yml` | `test_records.py` when `utils/audio/records.py` changes |
+| `records-audio-tests.yml` | the records, identity, cache, skill, intent, set and mixer suites when a records module or its tests change |
+| `records-browser-tests.yml` | the booth and KAIA//RX pages driven in Chromium (`tools/tests/browser/`) when either page or its server changes |
 | `quality.yml` | every push to `main`: `ruff check .` (error rules), then `tools/maintenance/type_ratchet.py` |
-| `dependency-audit.yml` | weekly and on a `requirements.txt` change: `pip-audit`, report-only |
+| `dependency-audit.yml` | weekly and on a `requirements.txt` change: `pip-audit`; blocking on a pull request, a report otherwise |
 
 `unit-tests.yml` also collects coverage from the tests it selected and fails when under 20% of
 the statements a change adds to `utils/*.py` ran (`tools/maintenance/changed_line_coverage.py`).
@@ -868,16 +869,16 @@ header. Rules that keep it safe, each with a test in `test_context_enricher_file
   inside the text (`[USER_MESSAGE]` …) are defused.
 - **What cannot be read says so.** A PDF, archive, binary, or oversized file arrives as
   `Contents unknown: …` — a fact, not an instruction, so she has nothing to guess from.
-- **A linked PDF is parsed out of process.** Ordinary chat-link extraction runs pypdf in an
-  isolated child with the address-space and CPU ceilings from `MAX_PDF_PARSE_MEMORY_BYTES` /
-  `MAX_PDF_PARSE_CPU_SECONDS`, plus `MAX_PDF_PARSE_TIMEOUT_SECONDS`. Raw bytes, pages and text
-  are capped. A timeout, resource kill, unsupported platform or parser error returns no extracted
-  text; never fall back to parsing an untrusted PDF in the bot process. Linux integration tests
-  exercise real `RLIMIT_AS`, `RLIMIT_CPU` and timeout/reaping behavior in
-  `test_context_enricher_links.py`. A process-wide bounded semaphore caps the bot at two
-  simultaneous PDF children; a queued extraction waits at most one second, then fails closed.
-  With the existing 256 MiB per-child address-space limit, the combined child address-space
-  ceiling is about 512 MiB per bot process, not a host-wide cap across multiple processes.
+- **Every PDF is parsed out of process, through one parser** (`utils/core/pdf_worker.py`): a linked
+  PDF, `!download`, the RAG indexer and the dream's snippet all run pypdf in a disposable child with
+  address-space, CPU and wall-clock ceilings and capped bytes, pages and text, one child at a time
+  per bot process (`PDF_MAX_CONCURRENT_WORKERS`). Each caller sets its own budget: a chat link 256 MiB,
+  3 s CPU and a one-second wait for the slot; the corpus 512 MiB and up to 60 s; `!download` 768 MiB;
+  the dream waits up to ten minutes. A timeout, resource kill, unsupported platform or parser error
+  returns no text, and an indexing pass leaves the last good index; never fall back to parsing an
+  untrusted PDF in the bot process. Async callers use `run_cancellable_in_thread`, which kills and
+  reaps the child on cancellation. Real `RLIMIT_AS`/`RLIMIT_CPU`/timeout behaviour is exercised in
+  `test_pdf_worker.py` and `test_context_enricher_links.py`.
 - **"summarize this file" after the file** finds it on the replied-to message, or on the author's
   own last 5 messages within 15 minutes. Images are not handled here; they stay on the vision path.
 
@@ -990,6 +991,12 @@ that are easy to break:
   worker; discord.py reads `BufferedRecordsSource`, which only dequeues finished 20 ms frames and never
   waits, logs or touches disk. The pair graph is measured in a niced separate process
   (`tools/maintenance/records_graph.py`), never in the bot.
+- **The booth's hand controls are real signal paths, each bounded.** PFL is its own decoder and EQ tap,
+  pre-fader, never the program's frames or Discord's audio; cues live in `memory/records/cues.json` by
+  audio identity; loops (1/2/4/8 beats), slip rolls, the jog bend (±8%, 10 s hold) and the pitch fader
+  are decoded or allocated on the request thread and swapped at a frame boundary under
+  `CrossfadeSource._lock`; the renderer only indexes prepared PCM. Booth changes are checked with real
+  pointer gestures in Chromium (`tools/tests/browser/`), never direct POSTs.
 - **One voice at a time, and a record is left where it changes**: the presence band changes hands with
   the mids (`presence`), the outgoing is gone a `tail` after the swap, and an end-of-record blend goes at
   the outro or last breakdown (`songmap`), else near the end, further back only as the last resort.
@@ -1001,6 +1008,22 @@ that are easy to break:
 - **Check a mix change on click tracks through the real `CrossfadeSource`**, and a booth change by driving
   it headless (Playwright) against a real session — not by reading the HTML.
 - **The booth shows only the mixer's own state.** If the mix did not do it, the screen does not show it.
+- **Musical judgment sits on measured feasibility, never in place of it.** Phrase profiles (`songmap`)
+  are evidence, not labels, and claim no phrase without a counted bar one; `musical_plan` reorders
+  measured locks and never invents an edge; a listener's direction (`records_intent`: more/less bass,
+  darker/brighter, build/drop, calmer/harder) steers a later pick only, once, for 15 minutes;
+  `dj_skills` may name only moves the engine really makes. The blend rides it compiles must match
+  `kaia_hands` (`test_blend_rides_match_the_kaia_hands_moves_they_replaced`). A lock is not a good
+  transition: taste is judged by listening, not by a test.
+- **Every audio-derived cache is keyed by `audio_identity.audio_signature`** (a BLAKE2 of the whole
+  payload, tags excluded), not path or mtime. Changing what the identity is invalidates every cache
+  keyed by it — the graph's measured pairs and the beat ticks, which cannot be found again while
+  Essentia is missing from the system Python — so it ships with a migration
+  (`tools/maintenance/migrate_record_identity.py`).
+- **None of it runs in the 20 ms callback:** profiles, hashing and planning are on worker threads or
+  `records_graph.py`'s process.
+- The rules in full: [records-and-booth.md](docs/03-architecture/records-and-booth.md), *Engineering
+  rules for the booth and the DJ*.
 
 Records, a live set and the radio share one voice connection: whichever starts stops the others
 without disconnecting (`stop(disconnect=False)`), or the incoming one would lose the channel it was
@@ -1771,6 +1794,12 @@ spend a session proving it again. On 26 Sept a "known issue" (`!download` unsear
 hour, BM25 in a pickle) had been fixed two days earlier and re-investigated anyway, because
 Part 1 was never updated when the roadmap closed it.
 
+**The repository review ledger** (`docs/audits/repository-review-ledger.csv`, for the #366 file-by-file
+audit) holds one row per tracked file with its git blob. Run `tools/maintenance/check_review_manifest.py`
+after a commit that adds, removes or changes tracked files: a changed blob goes back to `not_reviewed`
+unless that blob was itself reviewed, and a file is never marked reviewed for having been opened, listed
+or passed in CI. A passing check proves inventory, not correctness.
+
 **Scope containment.** If asked to update a specific file (e.g. a report), do not modify other
 files. Document proposed fixes in the report; apply them only when asked.
 
@@ -1816,9 +1845,11 @@ from the registry in seconds and touches nothing else, so run that whenever
 - Areas: `ttrpg`, `fishing`, `combat`, `housing`, `alchemy`, `core`, `docs`, `config`, `kaia`,
   `art`, `music`, `infra`, `social`
 - One logical change per commit; don't mix balance changes with bug fixes.
-- **Commit on `main` and push straight to `origin main`.** No feature branches, no pull requests,
-  no waiting on CI: Ekco is the only developer, and the `main-protection` ruleset was disabled on
-  21 Nov 2026 for that reason. CI still runs on the push; read the run if it fails.
+- **Default: commit on `main` and push straight to `origin main`.** This remains the normal
+  workflow while the `main-protection` ruleset is disabled. An explicit owner request to prepare
+  PRs overrides that default: create a feature branch and pull request, run the required checks,
+  and verify that every required workflow passed on the exact PR head SHA before merging. If a
+  fix changes the head, re-check the new SHA; never merge while a required check is pending or failing.
 - Add files by name. `git commit -a` swept Ekco's uncommitted `config/kaia.yaml` into a pushed
   commit (21 Nov); `config/` and `memory/` are never committed by an agent.
 

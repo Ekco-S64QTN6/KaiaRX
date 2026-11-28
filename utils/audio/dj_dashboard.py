@@ -8,10 +8,12 @@ the mix moved it.
 
 A small HTTP server on 127.0.0.1 serves `assets/dj/index.html`, a state
 stream (`/events`, server-sent events, 20 a second), each record's three-band
-waveform (`/wave/<id>`), the record files themselves for the page's
-headphones (`/audio/<id>`, with byte ranges; heard in the window, never on
-air), and the controls: the mixer (`/control`, `/reset`, `/blend`), the decks
-(`/play`, `/cue`, `/load`) and `/skip`, the same skip `!music skip` makes.
+waveform (`/wave/<id>`), the engine's local PFL/master headphone PCM stream
+(`/phones/stream`, fixed 20 ms frames), a legacy local record-file range endpoint
+(`/audio/<id>`, not used for PHONES), and the controls: mixer (`/control`, `/reset`, `/blend`), decks
+(`/play`, `/cue`, `/load`), headphone selection (`/phones`), momentary
+performance controls (`/bend`, `/roll`) and `/skip`, the same skip
+`!music skip` makes.
 When a set starts the page is opened as an app window in an installed
 browser, and closed when the set ends.
 """
@@ -20,7 +22,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
 import os
+import queue
 import shutil
 import subprocess
 import tempfile
@@ -33,6 +37,7 @@ from typing import Optional, cast
 import numpy as np
 
 from utils.infrastructure.logging.kaia_logger import log_debug, log_info, log_warning
+from utils.audio import record_cues
 
 PAGE = Path(__file__).resolve().parents[2] / "assets" / "dj" / "index.html"
 WAVE_RATE = 8000
@@ -54,6 +59,12 @@ _served_at = 0.0
 _profile_dir: Optional[str] = None
 _waves: dict[str, Optional[dict]] = {}          # id -> waveform, None while computing
 _paths: dict[str, str] = {}                     # id -> file
+_wave_identity: dict[str, str] = {}             # id -> complete source-audio identity
+_wave_stats: dict[str, tuple[int, int, int, int] | None] = {}  # fast change hint; not an identity
+_wave_checked: dict[str, float] = {}            # monotonic time of last full identity check
+_wave_checking: set[str] = set()
+WAVE_ID_RECHECK_S = 300.0                       # detect timestamp-preserving replacements in background
+WAVE_ERROR_RETRY_S = 15.0                        # retry failed reads without polling each frame
 _lock = threading.Lock()
 _mood_cache = {"at": 0.0, "value": {}}
 
@@ -130,23 +141,91 @@ def waveform(path: str) -> Optional[dict]:
 
 
 def _want_wave(path: str) -> str:
-    """Start computing a record's waveform if nobody has; returns its id."""
+    """Return the track's waveform id and refresh it off-thread when audio changes.
+
+    The booth asks for state frequently. It only stats the path on that hot
+    dashboard path; full hashing and waveform decoding happen in this worker.
+    The periodic identity check detects replacements that preserve size/mtime.
+    """
     tid = track_id(path)
+    try:
+        st = os.stat(path)
+        stat_key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+    except OSError:
+        stat_key = None
+    now = time.monotonic()
     with _lock:
-        if tid in _waves:
+        last = _wave_checked.get(tid, 0.0)
+        changed_stat = _wave_stats.get(tid) != stat_key
+        cached_wave = _waves.get(tid)
+        cached_error = isinstance(cached_wave, dict) and bool(cached_wave.get("error"))
+        retry_after = WAVE_ERROR_RETRY_S if cached_error else WAVE_ID_RECHECK_S
+        due = now - last >= retry_after
+        if tid in _waves and not changed_stat and not due:
             return tid
-        _waves[tid] = None
+        if tid in _wave_checking:
+            return tid
+        _wave_checking.add(tid)
         _paths[tid] = path
+        _wave_stats[tid] = stat_key
+        _waves.setdefault(tid, None)
         while len(_waves) > 24:                  # a set's worth; the oldest go
             old = next(iter(_waves))
             _waves.pop(old, None)
             _paths.pop(old, None)
+            _wave_identity.pop(old, None)
+            _wave_stats.pop(old, None)
+            _wave_checked.pop(old, None)
+            _wave_checking.discard(old)
 
     def run():
-        w = waveform(path)
-        with _lock:
-            if tid in _paths:
-                _waves[tid] = w or {"error": "could not read"}
+        from utils.audio.library import audio_signature
+
+        try:
+            signature = audio_signature(path, refresh=True)
+            with _lock:
+                previous = _wave_identity.get(tid)
+                if not signature:
+                    if tid in _paths:
+                        _waves[tid] = {"error": "could not read"}
+                    _wave_checked[tid] = time.monotonic()
+                    return
+                cached_wave = _waves.get(tid)
+                if (previous == signature and cached_wave is not None
+                        and not (isinstance(cached_wave, dict) and cached_wave.get("error"))):
+                    _wave_checked[tid] = time.monotonic()
+                    return
+                _wave_identity[tid] = signature
+                _waves[tid] = None
+
+            w = waveform(path)
+            still_same = audio_signature(path, refresh=True) == signature
+            try:
+                current = os.stat(path)
+                current_stat = (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+            except OSError:
+                current_stat = None
+            with _lock:
+                if tid in _paths and _paths[tid] == path:
+                    if still_same:
+                        _waves[tid] = w or {"error": "could not read"}
+                        _wave_checked[tid] = time.monotonic()
+                        _wave_stats[tid] = current_stat
+                    else:
+                        _waves[tid] = None
+                        _wave_checked[tid] = 0.0
+                        # Force the next snapshot to schedule a clean analysis.
+                        _wave_stats.pop(tid, None)
+        except Exception as exc:
+            log_debug(f"[dj] waveform refresh failed for {path}: {exc}")
+            with _lock:
+                if tid in _paths and _paths[tid] == path:
+                    _waves[tid] = {"error": "could not read"}
+                    _wave_checked[tid] = time.monotonic()
+        finally:
+            with _lock:
+                _wave_checking.discard(tid)
+
     threading.Thread(target=run, daemon=True, name="kaia-dj-wave").start()
     return tid
 
@@ -180,11 +259,13 @@ def _record(rec) -> dict:
 def _deck(d, state: str) -> dict:
     g = d.grid
     return {**_record(d.record), "slot": d.slot, "state": state, "ratio": round(d.ratio, 5),
-            "pitch": round((d.ratio - 1.0) * 100, 2), "gain_db": d.gain,
+            "pitch": round((d.ratio * d.playback_rate - 1.0) * 100, 2),
+            "playback_rate": round(d.playback_rate, 5), "pitch_control": d.pitch_control, "gain_db": d.gain,
             "pos": round(d.at() * d.ratio, 4),            # seconds of the record's own time
             "length": round(d.end * d.ratio, 3),
-            "tempo": round(g.bpm * d.ratio, 2) if g else (round(d.record.bpm * d.ratio, 2) if d.record.bpm else None),
-            "grid": _grid(g), "buffering": not d.ready(5), "key_now": d.key, "semitones": d.semitones}
+            "tempo": round(g.bpm * d.ratio * d.playback_rate, 2) if g else (round(d.record.bpm * d.ratio * d.playback_rate, 2) if d.record.bpm else None),
+            "grid": _grid(g), "buffering": not d.ready(5), "key_now": d.key, "semitones": d.semitones,
+            "loop": d.loop, "roll": d.roll, "bend": d.bend}
 
 
 #: How many times the booth has been launched (`open_window`, once per
@@ -194,13 +275,28 @@ _launch = 0
 
 
 def snapshot(session) -> dict:
-    """The booth as it stands, sampled at a committed mixer frame boundary."""
+    """The booth as it stands, sampled at a committed mixer frame boundary.
+
+    Cue-bank disk reads and audio identity checks happen after releasing the
+    renderer lock; they are cached and never run on the 20 ms audio path.
+    """
     if session is None or session.source is None:
         return {"live": False, "t": time.time(), "launch": _launch}
     src = session.source
-    mood = _mood()                      # read before the mixer's lock: it may touch disk
+    mood = _mood()
     with src._lock:
-        return _snapshot_locked(session, src, mood)
+        state = _snapshot_locked(session, src, mood)
+        records_by_slot = {}
+        for deck in (src.current, src.incoming, src.hand):
+            if deck is not None:
+                records_by_slot[deck.slot] = deck.record
+        if src._queued is not None:
+            records_by_slot.setdefault(src.free_slot(), src._queued.record)
+    for slot, record in records_by_slot.items():
+        deck_state = state.get("decks", {}).get(str(slot))
+        if deck_state is not None and deck_state.get("id") == track_id(record.path):
+            deck_state["cue_bank"] = record_cues.load(record)
+    return state
 
 
 def _snapshot_locked(session, src, mood: Optional[dict] = None) -> dict:
@@ -270,11 +366,15 @@ def _snapshot_locked(session, src, mood: Optional[dict] = None) -> dict:
         late = getattr(src, "late", ())
         late_count = len(late)
         worst_late = max(late, default=0.0)
+    headphone_deck = getattr(src, "_headphones_deck", None)
     return {
         "live": True, "t": time.time(), "channel": session.channel_name, "by": session.requested_by,
+        "headphones": {"slot": getattr(src, "_headphones_slot", None),
+                       "id": track_id(headphone_deck.record.path) if headphone_deck is not None else None},
         "started": session.started_at, "played": len(session.names), "listeners": session._humans(),
         "launch": _launch,
         "decks": decks, "channels": channels, "master": src.levels["master"], "mix": mix,
+        "fx": {"echo": src.effects.snapshot()},
         "planning": src.planning_mode, "late": {"count": late_count, "worst_ms": round(worst_late * 1000)},
         # frames a decoder was behind and played as silence this set
         "starved": R.DECKS_STARVED - getattr(session, "starved_at_start", R.DECKS_STARVED),
@@ -290,8 +390,25 @@ def _snapshot_locked(session, src, mood: Optional[dict] = None) -> dict:
         "on_air": cur.slot if cur else None, "free": free, "loading": getattr(session, "loading", None),
         "last_load": getattr(session, "last_load", None),
         "handover": round(src._hand_quiet / FRAMES_PER_S, 2) if hand is not None else None,
-        "key_sync": src.key_sync, "rides": src.rides, "gesture": src.gesture if src.rides else "", "energy": round(src.energy, 2),
+        "key_sync": src.key_sync, "rides": src.rides,
+        "gesture": src.gesture if src.rides else "",
+        "skills": src.skill_scheduler.snapshot(),
+        "energy": round(src.energy, 2),
     }
+
+
+def _cue_target(src, slot: int):
+    """Capture a deck's record and source-time playhead without doing disk I/O."""
+    with src._lock:
+        deck = next((item for item in (src.current, src.hand, src.incoming)
+                     if item is not None and item.slot == slot), None)
+        if deck is not None:
+            return deck.record, max(0.0, deck.at() * deck.ratio)
+        queued = src._queued if src.free_slot() == slot else None
+        if queued is not None:
+            position = src.cue if src.cue is not None else src.default_cue(queued)
+            return queued.record, max(0.0, float(position))
+    return None
 
 
 def _name_of(session, path: str) -> str:
@@ -349,6 +466,7 @@ def _session():
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "KaiaBooth/1"
+    protocol_version = "HTTP/1.1"
 
     def log_message(self, *a, **k):          # every request would land in the bot's stderr
         pass
@@ -385,6 +503,8 @@ class _Handler(BaseHTTPRequestHandler):
                     self._send(404, b"", "text/plain")
                 else:
                     self._send(200, hit[0].read_bytes(), hit[1])
+            elif path == "/phones/stream":
+                self._phones_stream()
             elif path.startswith("/audio/"):
                 self._audio(path.rsplit("/", 1)[-1])
             elif path.startswith("/wave/"):
@@ -428,9 +548,56 @@ class _Handler(BaseHTTPRequestHandler):
         except Exception as e:
             log_debug(f"[dj] {path}: {e}")
 
+    def _phones_stream(self) -> None:
+        """Stream bounded 48 kHz stereo PCM frames to the local booth only.
+
+        The renderer publishes the monitor bus into a per-client bounded queue;
+        the HTTP thread never reads a deck or blocks the Discord audio callback.
+        """
+        session = _session()
+        if session is None or session.source is None or getattr(session, "_closing", False):
+            return self._send(409, b"", "text/plain")
+        source = session.source
+        voice = getattr(session, "voice_source", None)
+        try:
+            buffered = int(voice._frames.qsize()) if voice is not None else 0
+        except Exception:
+            buffered = 0
+        stream = source.attach_headphone_stream(buffered)
+        if stream is None:
+            return self._send(503, b"headphone listener limit reached", "text/plain")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Kaia-PCM", "s16le;rate=48000;channels=2;frame_ms=20")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            while _server is not None and not getattr(session, "_closing", False):
+                try:
+                    frame = stream.get(timeout=0.02)
+                except queue.Empty:
+                    frame = b"\x00" * 3840
+                if len(frame) != 3840:
+                    frame = b"\x00" * 3840
+                self.wfile.write(f"{len(frame):X}\r\n".encode("ascii"))
+                self.wfile.write(frame)
+                self.wfile.write(b"\r\n")
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            source.detach_headphone_stream(stream)
+            try:
+                self.wfile.write(b"0\r\n\r\n")
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+
     def _audio(self, tid: str) -> None:
-        """A record's file, for the booth's headphones (CUE), with byte ranges
-        so the page can seek in it."""
+        """Legacy local range endpoint; PHONES now uses the engine's PFL PCM bus."""
         s = _session()
         rec = next((r for r in (s.crate if s else []) if track_id(r.path) == tid), None)
         path = rec.path if rec else _paths.get(tid)
@@ -498,6 +665,156 @@ class _Handler(BaseHTTPRequestHandler):
         if s is None or s.source is None:
             return self._send(409, b"", "text/plain")
         body, src = self._body(), s.source
+        if self.path == "/phones":
+            raw_slot = body.get("slot")
+            if raw_slot is None or raw_slot == "":
+                slot = None
+            elif isinstance(raw_slot, bool):
+                return self._send(400, b"", "text/plain")
+            elif isinstance(raw_slot, int):
+                slot = raw_slot
+            elif isinstance(raw_slot, str) and raw_slot.strip() in ("1", "2"):
+                slot = int(raw_slot.strip())
+            else:
+                return self._send(400, b"", "text/plain")
+            if slot not in (None, 1, 2):
+                return self._send(400, b"", "text/plain")
+            ok = src.set_headphones(slot, force=body.get("force") is True)
+            return self._send(204 if ok else 400, b"", "text/plain")
+        if self.path == "/loop":
+            raw_slot = body.get("slot")
+            if isinstance(raw_slot, bool):
+                return self._send(400, b"", "text/plain")
+            if raw_slot in (1, 2):
+                slot = raw_slot
+            elif isinstance(raw_slot, str) and raw_slot.strip() in ("1", "2"):
+                slot = int(raw_slot.strip())
+            else:
+                return self._send(400, b"", "text/plain")
+            action = body.get("action")
+            if action == "exit":
+                beats = None
+            elif action == "set":
+                beats = body.get("beats")
+                if isinstance(beats, bool) or not isinstance(beats, int) or beats not in (1, 2, 4, 8):
+                    return self._send(400, b"", "text/plain")
+            else:
+                return self._send(400, b"", "text/plain")
+            ok = src.set_loop(slot, beats)
+            return self._send(204 if ok else 409, b"", "text/plain")
+        if self.path == "/pitch":
+            raw_slot, raw_rate = body.get("slot"), body.get("rate")
+            if isinstance(raw_slot, bool) or raw_slot not in (1, 2, "1", "2"):
+                return self._send(400, b"", "text/plain")
+            slot = int(raw_slot)
+            if isinstance(raw_rate, bool) or not isinstance(raw_rate, (int, float)):
+                return self._send(400, b"", "text/plain")
+            try:
+                rate = float(raw_rate)
+            except (TypeError, ValueError, OverflowError):
+                return self._send(400, b"", "text/plain")
+            if not math.isfinite(rate) or not 0.92 <= rate <= 1.08:
+                return self._send(400, b"", "text/plain")
+            ok = src.set_pitch(slot, rate)
+            return self._send(204 if ok else 409, b"", "text/plain")
+        if self.path == "/bend":
+            raw_slot, action = body.get("slot"), body.get("action")
+            if isinstance(raw_slot, bool):
+                return self._send(400, b"", "text/plain")
+            if raw_slot in (1, 2):
+                slot = raw_slot
+            elif isinstance(raw_slot, str) and raw_slot.strip() in ("1", "2"):
+                slot = int(raw_slot.strip())
+            else:
+                return self._send(400, b"", "text/plain")
+            if action == "release":
+                rate = 1.0
+            elif action == "set":
+                rate = body.get("rate")
+                if isinstance(rate, bool) or not isinstance(rate, (int, float)):
+                    return self._send(400, b"", "text/plain")
+                try:
+                    requested_rate = float(rate)
+                except (TypeError, ValueError, OverflowError):
+                    return self._send(400, b"", "text/plain")
+                if not math.isfinite(requested_rate) or not 0.92 <= requested_rate <= 1.08:
+                    return self._send(400, b"", "text/plain")
+                rate = requested_rate
+            else:
+                return self._send(400, b"", "text/plain")
+            ok = src.set_bend(slot, rate, release=(action == "release"))
+            return self._send(204 if ok else 409, b"", "text/plain")
+        if self.path == "/roll":
+            raw_slot = body.get("slot")
+            if isinstance(raw_slot, bool):
+                return self._send(400, b"", "text/plain")
+            if raw_slot in (1, 2):
+                slot = raw_slot
+            elif isinstance(raw_slot, str) and raw_slot.strip() in ("1", "2"):
+                slot = int(raw_slot.strip())
+            else:
+                return self._send(400, b"", "text/plain")
+            action = body.get("action")
+            if action == "hold":
+                beats = body.get("beats")
+                if isinstance(beats, bool) or not isinstance(beats, int) or beats not in (1, 2, 4, 8):
+                    return self._send(400, b"", "text/plain")
+                ok = src.set_roll(slot, beats, pressed=True)
+            elif action == "release":
+                ok = src.set_roll(slot, 1, pressed=False)
+            else:
+                return self._send(400, b"", "text/plain")
+            return self._send(204 if ok else 409, b"", "text/plain")
+        if self.path == "/cuebank":
+            raw_slot, raw_index = body.get("slot"), body.get("index")
+            if isinstance(raw_slot, bool) or raw_slot not in (1, 2, "1", "2"):
+                return self._send(400, b"", "text/plain")
+            slot = int(raw_slot)
+            kind = body.get("kind")
+            if kind not in ("hot", "memory"):
+                return self._send(400, b"", "text/plain")
+            index = None
+            if kind == "hot":
+                if isinstance(raw_index, bool) or not isinstance(raw_index, int) or not 0 <= raw_index < record_cues.HOT_CUE_COUNT:
+                    return self._send(400, b"", "text/plain")
+                index = raw_index
+            target = _cue_target(src, slot)
+            if target is None:
+                return self._send(409, b"", "text/plain")
+            record, current_position = target
+            bank = record_cues.load(record)
+            cue = bank["memory"] if kind == "memory" else bank["hot"][index]
+            action = body.get("action", "toggle")
+            if action == "clear":
+                ok = record_cues.clear_memory(record) if kind == "memory" else record_cues.clear_hot(record, index)
+                action = "cleared"
+            elif action == "store" or (action == "toggle" and cue is None):
+                ok = (record_cues.set_memory(record, current_position) if kind == "memory"
+                      else record_cues.set_hot(record, index, current_position))
+                action = "stored"
+            elif action in ("toggle", "jump"):
+                ok = src.jump_to_cue(slot, cue, expected_path=record.path)
+                action = "jumped"
+            else:
+                return self._send(400, b"", "text/plain")
+            if not ok:
+                return self._send(409, b"", "text/plain")
+            result = {"ok": True, "action": action, "cue_bank": record_cues.load(record)}
+            return self._send(200, json.dumps(result).encode(), "application/json")
+        if self.path == "/fx/echo":
+            action = body.get("action")
+            if action == "off":
+                ok = src.set_echo(False)
+            elif action == "on":
+                ok = src.set_echo(
+                    True,
+                    beats=body.get("beats", 1),
+                    feedback=body.get("feedback", 0.35),
+                    wet=body.get("wet", 0.30),
+                )
+            else:
+                return self._send(400, b"", "text/plain")
+            return self._send(204 if ok else 409, b"", "text/plain")
         # Keep booth mutations at an audio-frame boundary. RecordsSession.load()
         # follows the same mixer -> load lock order to avoid a lock cycle.
         with src._lock:
@@ -507,11 +824,15 @@ class _Handler(BaseHTTPRequestHandler):
                 ok = True
             elif self.path == "/control":
                 slot = body.get("slot")
-                ok = src.controls.set(int(slot) if slot not in (None, "") else None, str(body.get("name", "")),
-                                      body.get("value"))
+                ok = src.set_control(
+                    int(slot) if slot not in (None, "") else None,
+                    str(body.get("name", "")), body.get("value"),
+                )
             elif self.path == "/rides":
-                src.rides = not src.rides
-                src.gesture = ""
+                with src._lock:
+                    src.rides = not src.rides
+                    src.skill_scheduler.set_enabled(src.rides)
+                    src.gesture = ""
                 log_info(f"[records] Kaia's hands on the mixer {'on' if src.rides else 'off'} from the booth")
                 ok = True
             elif self.path == "/blend":
@@ -519,10 +840,17 @@ class _Handler(BaseHTTPRequestHandler):
                 if ok:
                     log_info(f"[records] blends from the booth: {src._mix_beats} beats")
             elif self.path == "/reset":
-                if src.hand is not None:
-                    src.finish()                     # she takes the mix from where the hands left it
-                src.controls.reset()
-                src.paused.clear()
+                if src.current is not None and src.current.bend["active"]:
+                    src.set_bend(src.current.slot, 1.0, release=True)
+                with src._lock:
+                    if src.hand is not None:
+                        src.finish()                 # she takes the mix from where the hands left it
+                    src.controls.reset()
+                    src.effects.cancel()
+                    src.paused.clear()
+                    src.skill_scheduler.hand_back_all()
+                    src.rides = True
+                    src.gesture = ""
                 log_info("[records] the booth handed the mix back to Kaia")
                 ok = True
             elif self.path in ("/pause", "/play"):
@@ -531,6 +859,8 @@ class _Handler(BaseHTTPRequestHandler):
                 slot = int(body.get("slot") or 0)
                 ok = slot in (1, 2)
                 if ok and src.current is not None and slot == src.current.slot:
+                    if src.current.bend["active"]:
+                        src.set_bend(slot, 1.0, release=True)
                     src.paused.symmetric_difference_update({slot})
                 elif ok and src.hand is not None:
                     ok = src.stop_hand()
